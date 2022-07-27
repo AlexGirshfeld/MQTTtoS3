@@ -1,0 +1,4 @@
+broker: tcp://test.mosquitto.org:1883
+buckets:
+  bucket_1: [topic/secret1, topic1/secret1]
+  bucket_2: [topic/secret2, topic2/secret1]
