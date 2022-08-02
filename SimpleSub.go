@@ -1,29 +1,50 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"gopkg.in/yaml.v3"
 	"io/ioutil"
 	"log"
 	"time"
-
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
+
+type Conf struct {
+	Broker  string              `yaml:"broker"`
+	Buckets map[string][]string `yaml:"buckets"`
+}
 
 var messagePubHandler mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
 	fmt.Printf("Message %s received on topic %s\n", msg.Payload(), msg.Topic())
 }
 
 func messageHandlerCreator(c chan mqtt.Message) func(mqtt.Client, mqtt.Message) {
+	// gets a channel, and return a function that send messages to this channel
 	return func(client mqtt.Client, msg mqtt.Message) {
 		c <- msg
 	}
 }
 
-func receiver(bucket string, channel chan mqtt.Message) {
+func receiver(bucket string, channel chan mqtt.Message, uploader *s3manager.Uploader) {
 	for msg := range channel {
 		fmt.Printf("Message %s received on topic %s and will be uploaded to bucket %s\n",
 			msg.Payload(), msg.Topic(), bucket)
+		// to phase 1 - upload the message to s3
+
+		result, err := uploader.Upload(&s3manager.UploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(msg.Topic() + "/" + time.Now().String()),
+			Body:   bytes.NewReader(msg.Payload()),
+		})
+		if err != nil {
+			fmt.Printf("failed to upload file, %v\n", err)
+		}
+		fmt.Printf("Message %s with topic %s is uploaded to bucket %s\n ID = %s, location = %s",
+			msg.Payload(), msg.Topic(), bucket, result.UploadID, result.Location)
 	}
 }
 
@@ -33,11 +54,6 @@ var connectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
 
 var connectionLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
 	fmt.Printf("Connection Lost: %s\n", err.Error())
-}
-
-type Conf struct {
-	Broker  string              `yaml:"broker"`
-	Buckets map[string][]string `yaml:"buckets"`
 }
 
 func main() {
@@ -68,12 +84,18 @@ func main() {
 		panic(token.Error())
 	}
 
+	//// s3 utils
+	// The session the S3 Uploader will use
+	sess, err := session.NewSession(&aws.Config{Region: aws.String("eu-west-3")})
+	// Create an uploader with the session and default options
+	uploader := s3manager.NewUploader(sess)
+
 	// subscribe the buckets to their channels
 	for bucket, topics := range conf.Buckets {
 		// for each bucket create a channel
 		tmpChannel := make(chan mqtt.Message)
 		// the function that will receive all the messages that go to the bucket
-		go receiver(bucket, tmpChannel)
+		go receiver(bucket, tmpChannel, uploader)
 		// the function that is called after mqtt received a message in a channel
 		messageHandler := messageHandlerCreator(tmpChannel)
 		// subscribe to the channels and set the message handler ass the callbcak
